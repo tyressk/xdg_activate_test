@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 env_logger = "0.11.5"
 lazy_static = "1.5.0"
-smithay-client-toolkit = "0.19.2"
-wayland-client = "0.31.6"
-
+#smithay-client-toolkit = "0.19.2"
+smithay-client-toolkit  = { git = "https://github.com/Smithay/client-toolkit.git", branch = "master" }
+#wayland-client = "0.31.6"
+#wayland-client  = { git = "https://github.com/Smithay/wayland-rs.git", branch = "master" }
+rustix = "^0.38.42"

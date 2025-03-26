@@ -1,5 +1,10 @@
 use std::{convert::TryInto, time::Duration};
 use lazy_static::lazy_static;
+use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
+use smithay_client_toolkit::reexports::client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface};
+use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
+use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
+use smithay_client_toolkit::seat::keyboard::RawModifiers;
 use std::sync::Mutex;
 use smithay_client_toolkit::activation::RequestData;
 use smithay_client_toolkit::reexports::calloop::{EventLoop, LoopHandle};
@@ -29,15 +34,11 @@ use smithay_client_toolkit::{
         Shm, ShmHandler,
     },
 };
-use wayland_client::{
-    globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
-    Connection, QueueHandle,
-};
 
 lazy_static! {
     #[derive(Debug)]
     static ref LAST_TOKEN: Mutex<String> = Mutex::new(String::new());
+    static ref LAST_SURFACE:Mutex<Option<WlSurface>> = Mutex::new(None::<WlSurface>);
 }
 fn main() {
     env_logger::init();
@@ -120,6 +121,7 @@ fn main() {
         pointer: None,
         loop_handle: event_loop.handle(),
     };
+    *LAST_SURFACE.lock().unwrap() = Some(simple_window.window.wl_surface() .clone());
 
     // We don't draw immediately, the configure will notify us when to first draw.
     loop {
@@ -250,7 +252,6 @@ impl WindowHandler for SimpleWindow {
         _serial: u32,
     ) {
         println!("Window configured to: {:?}", configure);
-
         self.buffer = None;
         self.width = configure.new_size.0.map(|v| v.get()).unwrap_or(256);
         self.height = configure.new_size.1.map(|v| v.get()).unwrap_or(256);
@@ -267,9 +268,8 @@ impl ActivationHandler for SimpleWindow {
     type RequestData = RequestData;
 
     fn new_token(&mut self, token: String, _data: &Self::RequestData) {
-        let mut global_string = LAST_TOKEN.lock().unwrap();
-        *global_string = token.clone();
-        println!("Acquired token:{}",global_string);
+        *LAST_TOKEN.lock().unwrap() = token.clone();
+        println!("Acquired token:{:?}",LAST_TOKEN.lock().unwrap());
         self.xdg_activation
             .as_ref()
             .unwrap()
@@ -373,7 +373,7 @@ impl KeyboardHandler for SimpleWindow {
        _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
-        _: u32,
+        serial: u32,
         event: KeyEvent,
     ) {
         println!("Key press: {event:?}");
@@ -392,7 +392,6 @@ impl KeyboardHandler for SimpleWindow {
         let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor not available");
         let surface = compositor.create_surface(&qh);
         let xdg_shell = XdgShell::bind(&globals, &qh).expect("xdg shell is not available");
-        let last_token = LAST_TOKEN.lock().unwrap().to_string();
 
         let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
         window.set_title("Spun off simple window with token");
@@ -404,9 +403,11 @@ impl KeyboardHandler for SimpleWindow {
        
         let shm: Shm = Shm::bind(&globals, &qh).expect("wl shm is not available.");
         let pool = SlotPool::new(256 * 256 * 4, &shm).expect("Failed to create pool");
+        let seat_state = SeatState::new(&globals, &qh);
+        let seat =  seat_state.seats().next().unwrap();
         let mut simple_window = SimpleWindow {
             registry_state: RegistryState::new(&globals),
-            seat_state: SeatState::new(&globals, &qh),
+            seat_state,
             output_state: OutputState::new(&globals, &qh),
             shm,
             xdg_activation,
@@ -425,11 +426,28 @@ impl KeyboardHandler for SimpleWindow {
             loop_handle: event_loop.handle(),
         };
         if let Some(activation) = simple_window.xdg_activation.as_ref() {
-            activation.activate::<String>(simple_window.window.wl_surface(), last_token);
+            let last_surface = LAST_SURFACE.lock().unwrap().as_ref().unwrap().clone();
+            
+           println!("{:?}",last_surface);
+            activation.request_token(
+                &qh,
+                RequestData {
+                    seat_and_serial: Some((seat,serial)),
+                    surface: Some(last_surface.clone()),
+                    app_id: Some(String::from("io.github.smithay.client-toolkit.SimpleWindow")),
+                },
+            );
+        
+        }
+        
+        event_loop.dispatch(Duration::from_millis(16), &mut simple_window).unwrap();
+        if let Some(activation) = simple_window.xdg_activation.as_ref() {
+            let last_token = LAST_TOKEN.lock().unwrap().to_string();
+            println!("Activating using:{}",last_token);
+            activation.activate::<SimpleWindow>(simple_window.window.wl_surface(), last_token);
+            
             println!("Activated");
         }
-        event_loop.dispatch(Duration::from_millis(16), &mut simple_window).unwrap();
-
         println!("Window Launched.");
 
     }
@@ -452,6 +470,7 @@ impl KeyboardHandler for SimpleWindow {
         _: &wl_keyboard::WlKeyboard,
         _serial: u32,
         modifiers: Modifiers,
+        _raw_modifiers: RawModifiers, 
         _layout: u32,
     ) {
         println!("Update modifiers: {modifiers:?}");
